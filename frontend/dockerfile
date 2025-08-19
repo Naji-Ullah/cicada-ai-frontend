@@ -1,0 +1,15 @@
+# Stage 1: Build the React app
+FROM node:20 AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+# Stage 2: Serve the React app
+FROM node:20-slim
+RUN npm install -g serve
+COPY --from=build /app/dist /app/dist
+WORKDIR /app
+EXPOSE 3000
+CMD ["serve", "-s", "dist", "-l", "3000"]
