@@ -38,28 +38,77 @@ export interface User {
 }
 
 class ApiService {
+  private getAccessToken(): string | null {
+    return localStorage.getItem("access");
+  }
+
+  private getRefreshToken(): string | null {
+    return localStorage.getItem("refresh");
+  }
+
+  private async refreshToken(): Promise<string | null> {
+    const refresh = this.getRefreshToken();
+    if (!refresh) return null;
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/refresh/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh }), // ✅ DRF SimpleJWT expects "refresh"
+      });
+
+      if (!response.ok) throw new Error("Failed to refresh token");
+
+      const data = await response.json();
+      if (data.access) { // ✅ DRF returns "access"
+        localStorage.setItem("access", data.access);
+        return data.access;
+      }
+      return null;
+    } catch (err) {
+      console.error("Token refresh failed:", err);
+      this.clearBrowserStorage();
+      return null;
+    }
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {
     const url = `${API_BASE_URL}${endpoint}`;
-        console.log(`Making API request to: ${url}`);
+    console.log(`Making API request to: ${url}`);
 
-    const config: RequestInit = {
-      credentials: 'include',
+    let accessToken = this.getAccessToken();
+
+    let config: RequestInit = {
       headers: {
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
+        "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         ...options.headers,
       },
       ...options,
     };
 
-    const response = await fetch(url, config);
-    
+    let response = await fetch(url, config);
+
+    // If token expired, try refreshing
+    if (response.status === 401) {
+      accessToken = await this.refreshToken();
+      if (accessToken) {
+        config.headers = {
+          ...config.headers,
+          Authorization: `Bearer ${accessToken}`,
+        };
+        response = await fetch(url, config);
+      }
+    }
+
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+      throw new Error(
+        errorData.detail || errorData.error || `HTTP error! status: ${response.status}`
+      );
     }
 
     return response.json();
@@ -68,75 +117,89 @@ class ApiService {
   private clearBrowserStorage(): void {
     try {
       localStorage.clear();
-      
       sessionStorage.clear();
-      
       document.cookie.split(";").forEach((c) => {
         document.cookie = c
           .replace(/^ +/, "")
-          .replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
+          .replace(
+            /=.*/,
+            "=;expires=" + new Date().toUTCString() + ";path=/"
+          );
       });
     } catch (error) {
-      console.warn('Error clearing browser storage:', error);
+      console.warn("Error clearing browser storage:", error);
     }
   }
 
-  async login(data: LoginRequest): Promise<{ user: User; message: string }> {
-    return this.request('/auth/login/', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+  async login(data: LoginRequest): Promise<{ user: User; access: string; refresh: string }> {
+    const res = await this.request<{ user: User; access: string; refresh: string }>(
+      "/auth/login/",
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      }
+    );
+
+    // ✅ Save tokens with correct keys
+    if (res.access && res.refresh) {
+      localStorage.setItem("access", res.access);
+      localStorage.setItem("refresh", res.refresh);
+    } else {
+      console.warn("Login response did not include tokens:", res);
+    }
+
+    return res;
   }
 
   async register(data: RegisterRequest): Promise<{ user: User; message: string }> {
-    return this.request('/auth/register/', {
-      method: 'POST',
+    return this.request("/auth/register/", {
+      method: "POST",
       body: JSON.stringify(data),
     });
   }
 
-  async logout(): Promise<{ message: string }> {
+async logout(): Promise<{ message: string }> {
     try {
-      const response = await this.request<{ message: string }>('/auth/logout/', {
-        method: 'POST',
-      });
-      
-      this.clearBrowserStorage();
-      
-      return response;
+        const refresh = this.getRefreshToken();
+        const response = await this.request<{ message: string }>("/auth/logout/", {
+            method: "POST",
+            body: JSON.stringify({ refresh }), // Send refresh token
+        });
+
+        this.clearBrowserStorage();
+        return response;
     } catch (error) {
-      console.error('Logout request failed:', error);
-      this.clearBrowserStorage();
-      return { message: 'Logout completed' };
+        console.error("Logout request failed:", error);
+        this.clearBrowserStorage();
+        return { message: "Logout completed" };
     }
-  }
+}
 
   async getProfile(): Promise<User> {
     try {
-      return await this.request<User>('/auth/profile/');
+      return await this.request<User>("/auth/profile/");
     } catch (error) {
-
-      if (error instanceof Error && error.message.includes('403')) {
-        throw new Error('Not authenticated');
+      if (error instanceof Error && error.message.includes("403")) {
+        throw new Error("Not authenticated");
       }
       throw error;
     }
   }
 
   async getChatHistory(): Promise<ChatMessage[]> {
-    return this.request('/chat/');
+    return this.request("/chat/");
   }
 
   async sendMessage(message: string): Promise<ChatResponse> {
-    return this.request('/chat/', {
-      method: 'POST',
+    return this.request("/chat/", {
+      method: "POST",
       body: JSON.stringify({ message }),
     });
   }
 
   async clearChat(): Promise<{ message: string }> {
-    return this.request('/chat/clear/', {
-      method: 'DELETE',
+    return this.request("/chat/clear/", {
+      method: "DELETE",
     });
   }
 }
